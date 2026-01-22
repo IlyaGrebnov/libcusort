@@ -26,8 +26,8 @@ Please see the file LICENSE for full copyright and license details.
 
 #define LIBCUSORT_VERSION_MAJOR          1
 #define LIBCUSORT_VERSION_MINOR          0
-#define LIBCUSORT_VERSION_PATCH          0
-#define LIBCUSORT_VERSION_STRING         "1.0.0"
+#define LIBCUSORT_VERSION_PATCH          1
+#define LIBCUSORT_VERSION_STRING         "1.0.1"
 
 #include <cuda_runtime.h>
 
@@ -477,6 +477,19 @@ namespace cusort
                 cs              // st.global.cs.*                 (cache streaming, evict first)
             };
 
+            // Global memory prefetch cache policies. Brings cache line containing address into
+            // specified cache level. Useful for hiding memory latency by prefetching data before
+            // it's needed. L2 eviction hints control cache replacement priority:
+            // - evict_normal: Standard LRU eviction (default behavior)
+            // - evict_last:   Keep in cache longer, evict only when no other candidates
+            enum class prefetch_global_op
+            {
+                L1,             // prefetch.global.L1                 (prefetch to L1 cache)
+                L2,             // prefetch.global.L2                 (prefetch to L2 cache)
+                L2_evict_normal,// prefetch.global.L2::evict_normal   (L2, normal eviction priority)
+                L2_evict_last   // prefetch.global.L2::evict_last     (L2, evict last / keep longer)
+            };
+
             // Type-specialized PTX load/store wrappers. Each function emits the exact PTX instruction
             // for the specified type and cache policy. Using templates with if constexpr generates
             // only the single instruction needed, with no runtime branching.
@@ -882,6 +895,27 @@ namespace cusort
                 else
                 {
                     static_assert(sizeof(T) == 0, "st_global: Unsupported type T");
+                }
+            }
+
+            template <prefetch_global_op op>
+            CUSORT_DEVICE CUSORT_FORCEINLINE void prefetch_global(const void *ptr)
+            {
+                if constexpr (op == prefetch_global_op::L1)
+                {
+                    asm volatile("prefetch.global.L1 [%0];" ::"l"(ptr));
+                }
+                else if constexpr (op == prefetch_global_op::L2)
+                {
+                    asm volatile("prefetch.global.L2 [%0];" ::"l"(ptr));
+                }
+                else if constexpr (op == prefetch_global_op::L2_evict_normal)
+                {
+                    asm volatile("prefetch.global.L2::evict_normal [%0];" ::"l"(ptr));
+                }
+                else if constexpr (op == prefetch_global_op::L2_evict_last)
+                {
+                    asm volatile("prefetch.global.L2::evict_last [%0];" ::"l"(ptr));
                 }
             }
 
@@ -1345,6 +1379,40 @@ namespace cusort
                 }
 
                 return prefix_sum;
+            }
+
+            // Prefetch a warp's portion of a tile to hide memory latency. Each warp prefetches its
+            // slice of the tile (WARP_SIZE * ITEMS_PER_THREAD elements). Cache line alignment is
+            // computed dynamically to avoid redundant fetches. Threads cooperatively issue prefetch
+            // instructions, spreading 128-byte cache lines across the warp.
+            template <ptx::prefetch_global_op PrefetchOp, typename T, int ITEMS_PER_THREAD>
+            CUSORT_DEVICE CUSORT_FORCEINLINE void WarpStripedPrefetch(const T* tile_base)
+            {
+                constexpr unsigned int WARP_SIZE            = 32;
+                constexpr unsigned int CACHE_LINE_SIZE      = 128;
+                constexpr unsigned int WARP_BYTES           = WARP_SIZE * ITEMS_PER_THREAD * sizeof(T);
+                constexpr unsigned int CACHE_LINE_COUNT     = (WARP_BYTES + CACHE_LINE_SIZE - 1) / CACHE_LINE_SIZE;
+                constexpr unsigned int PREFETCH_ROUNDS      = (CACHE_LINE_COUNT + WARP_SIZE - 1) / WARP_SIZE;
+
+                const char *warp_base                       = reinterpret_cast<const char *>(tile_base) + ptx::warp_id() * WARP_BYTES;
+                unsigned int thread_offset                  = ptx::lane_id() * CACHE_LINE_SIZE;
+
+                if constexpr (WARP_BYTES % CACHE_LINE_SIZE != 0)
+                {
+                    const unsigned int warp_base_lo = static_cast<unsigned int>(reinterpret_cast<uintptr_t>(warp_base));
+                    thread_offset += ((CACHE_LINE_SIZE - warp_base_lo) & (CACHE_LINE_SIZE - 1));
+                }
+
+                const char *thread_ptr = warp_base + thread_offset;
+
+                CUSORT_PRAGMA_UNROLL_FULL
+                for (unsigned int r = 0; r < PREFETCH_ROUNDS; ++r)
+                {
+                    if (static_cast<int>(ptx::lane_id()) < static_cast<int>(CACHE_LINE_COUNT - r * WARP_SIZE))
+                    {
+                        ptx::prefetch_global<PrefetchOp>(thread_ptr + r * WARP_SIZE * CACHE_LINE_SIZE);
+                    }
+                }
             }
 
             // Block-wide memory copy using warp-striped access pattern. Each warp handles a
@@ -1912,17 +1980,17 @@ namespace cusort
                     }
                 }
 
-                // PHASE 2: Accumulate digit counts using shared memory atomics.
+                // PHASE 2: Accumulate digit counts in per-warp histograms.
                 {
                     unsigned int *s_warp_histogram = s_mem.warp_histogram + ptx::warp_id() * RADIX_COUNT;
 
                     CUSORT_PRAGMA_UNROLL_FULL
                     for (unsigned int i = 0; i < ITEMS_PER_THREAD; ++i)
                     {
-                        const unsigned int r        = i / ITEMS_PER_REGISTER;
-                        const unsigned int s        = i % ITEMS_PER_REGISTER;
-                        const unsigned int shift    = s * (sizeof(KeyT) * 8);
-                        const unsigned int digit    = static_cast<unsigned int>(bit_ordered_keys[r] >> shift) & digit_mask;
+                        const unsigned int r     = i / ITEMS_PER_REGISTER;
+                        const unsigned int s     = i % ITEMS_PER_REGISTER;
+                        const unsigned int shift = s * (sizeof(KeyT) * 8);
+                        const unsigned int digit = static_cast<unsigned int>(bit_ordered_keys[r] >> shift) & digit_mask;
 
                         atomicAdd(&s_warp_histogram[digit], 1u);
                     }
@@ -1995,6 +2063,9 @@ namespace cusort
                                 OffsetT src_offset = static_cast<OffsetT>(blockIdx.x) * TILE_ITEMS;
                                 WarpStripedBlockCopy<LOAD_OP, STORE_OP, ValueT, ITEMS_PER_THREAD>(d_values_in + src_offset, d_values_out + dst_offset);
                             }
+
+                            // Launch next radix pass early; it can begin zeroing histograms (Phase 0) while this pass finishes writing.
+                            ptx::grid_launch_dependents();
 
                             return;
                         }
@@ -2209,6 +2280,9 @@ namespace cusort
 
                 if constexpr (!KEYS_ONLY)
                 {
+                    // Prefetch values while keys are being written (hides latency during __syncthreads).
+                    WarpStripedPrefetch<ptx::prefetch_global_op::L1, ValueT, ITEMS_PER_THREAD>(d_values_in + static_cast<OffsetT>(blockIdx.x) * TILE_ITEMS);
+
                     // Ensure keys are written before reusing s_mem union for values scatter.
                     __syncthreads();
 
@@ -2359,52 +2433,52 @@ namespace cusort
             constexpr OnesweepTuningEntry ONESWEEP_TUNING_TABLE[] =
             {
                 // Key   Value  Offset  CTA   BT   IPT
-                {   1,     0,     4,     3,   256,  44 },
-                {   1,     0,     8,     3,   256,  44 },
-                {   2,     0,     4,     2,   512,  26 },
-                {   2,     0,     8,     2,   512,  26 },
+                {   1,     0,     4,     2,   384,  44 },
+                {   1,     0,     8,     2,   384,  44 },
+                {   2,     0,     4,     2,   512,  28 },
+                {   2,     0,     8,     2,   512,  28 },
                 {   4,     0,     4,     2,   512,  21 },
                 {   4,     0,     8,     2,   512,  21 },
-                {   8,     0,     4,     1,   384,  11 },
-                {   8,     0,     8,     1,   384,  11 },
-                {   1,     1,     4,     2,   512,  28 },
-                {   1,     1,     8,     2,   512,  28 },
-                {   1,     2,     4,     2,   384,  32 },
-                {   1,     2,     8,     2,   384,  32 },
-                {   1,     4,     4,     1,   384,  28 },
-                {   1,     4,     8,     1,   384,  28 },
+                {   8,     0,     4,     1,   384,  13 },
+                {   8,     0,     8,     1,   384,  13 },
+                {   1,     1,     4,     2,   384,  44 },
+                {   1,     1,     8,     2,   384,  44 },
+                {   1,     2,     4,     2,   384,  28 },
+                {   1,     2,     8,     2,   384,  28 },
+                {   1,     4,     4,     1,   384,  24 },
+                {   1,     4,     8,     1,   384,  24 },
                 {   1,     8,     4,     2,   384,  12 },
                 {   1,     8,     8,     2,   384,  12 },
                 {   1,    16,     4,     2,   512,   4 },
                 {   1,    16,     8,     2,   512,   4 },
-                {   2,     1,     4,     2,   384,  32 },
-                {   2,     1,     8,     2,   384,  32 },
-                {   2,     2,     4,     1,   512,  38 },
-                {   2,     2,     8,     1,   512,  38 },
-                {   2,     4,     4,     1,   384,  22 },
-                {   2,     4,     8,     1,   384,  22 },
-                {   2,     8,     4,     2,   512,   6 },
-                {   2,     8,     8,     2,   512,   6 },
-                {   2,    16,     4,     2,   384,   6 },
-                {   2,    16,     8,     2,   384,   6 },
-                {   4,     1,     4,     1,   512,  22 },
-                {   4,     1,     8,     1,   512,  22 },
+                {   2,     1,     4,     2,   384,  36 },
+                {   2,     1,     8,     2,   384,  36 },
+                {   2,     2,     4,     1,   512,  26 },
+                {   2,     2,     8,     1,   512,  26 },
+                {   2,     4,     4,     1,   512,  16 },
+                {   2,     4,     8,     1,   512,  16 },
+                {   2,     8,     4,     2,   384,  12 },
+                {   2,     8,     8,     2,   384,  12 },
+                {   2,    16,     4,     2,   256,  10 },
+                {   2,    16,     8,     2,   256,  10 },
+                {   4,     1,     4,     1,   512,  21 },
+                {   4,     1,     8,     1,   512,  21 },
                 {   4,     2,     4,     1,   512,  22 },
                 {   4,     2,     8,     1,   512,  22 },
-                {   4,     4,     4,     1,   512,  22 },
-                {   4,     4,     8,     1,   512,  22 },
+                {   4,     4,     4,     1,   512,  23 },
+                {   4,     4,     8,     1,   512,  23 },
                 {   4,     8,     4,     1,   384,  15 },
                 {   4,     8,     8,     1,   384,  15 },
-                {   4,    16,     4,     2,   384,   6 },
-                {   4,    16,     8,     2,   384,   6 },
-                {   8,     1,     4,     1,   512,  11 },
-                {   8,     1,     8,     1,   512,  11 },
+                {   4,    16,     4,     2,   512,   5 },
+                {   4,    16,     8,     2,   512,   5 },
+                {   8,     1,     4,     1,   384,  15 },
+                {   8,     1,     8,     1,   384,  15 },
                 {   8,     2,     4,     1,   512,  11 },
                 {   8,     2,     8,     1,   512,  11 },
-                {   8,     4,     4,     1,   256,  22 },
-                {   8,     4,     8,     1,   256,  22 },
-                {   8,     8,     4,     1,   512,  11 },
-                {   8,     8,     8,     1,   512,  11 },
+                {   8,     4,     4,     1,   384,  15 },
+                {   8,     4,     8,     1,   384,  15 },
+                {   8,     8,     4,     1,   384,  14 },
+                {   8,     8,     8,     1,   384,  14 },
                 {   8,    16,     4,     2,   384,   6 },
                 {   8,    16,     8,     2,   384,   6 },
             };

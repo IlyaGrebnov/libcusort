@@ -14,63 +14,51 @@ CUB's radix sort is already memory-bound — the theoretical best case for a sor
 
 **RTX 5090, CUDA 13.1, 67M elements:**
 
-| Type | libcusort | CUB | Δ |
-|------|-----------|-----|---|
-| int32_t keys | 1.53ms | 1.62ms | **+6%** |
-| int64_t keys | 6.12ms | 6.19ms | **+1%** |
-| float keys | 1.53ms | 1.62ms | **+6%** |
-| int32_t + int32_t pairs | 3.07ms | 3.10ms | **+1%** |
-
-<details>
-<summary>Full benchmark results (67M elements, 36 configurations)</summary>
-
 ### Keys-Only
 
 | Key Type | libcusort | CUB | Speedup |
 |----------|-----------|-----|---------|
-| int8_t | 0.192ms | 0.254ms | +32.6% |
-| int16_t | 0.413ms | 0.499ms | +20.8% |
-| int32_t | 1.529ms | 1.615ms | +5.6% |
-| int64_t | 6.124ms | 6.185ms | +1.0% |
-| float | 1.529ms | 1.621ms | +6.0% |
-| double | 6.156ms | 6.369ms | +3.5% |
+| int8_t | 0.188ms | 0.251ms | +33.6% |
+| int16_t | 0.404ms | 0.495ms | +22.5% |
+| int32_t | 1.537ms | 1.609ms | +4.7% |
+| int64_t | 6.103ms | 6.171ms | +1.1% |
+| float | 1.537ms | 1.618ms | +5.3% |
+| double | 6.124ms | 6.347ms | +3.6% |
 
 ### Key-Value Pairs
 
 | Key | Value | libcusort | CUB | Speedup |
 |-----|-------|-----------|-----|---------|
-| int8_t | int8_t | 0.270ms | 0.372ms | +37.5% |
-| int8_t | int16_t | 0.332ms | 0.460ms | +38.6% |
-| int8_t | int32_t | 0.508ms | 0.521ms | +2.6% |
-| int8_t | int64_t | 0.905ms | 0.912ms | +0.8% |
-| int8_t | ulonglong2 | 1.646ms | 1.651ms | +0.3% |
-| int16_t | int8_t | 0.627ms | 0.697ms | +11.3% |
-| int16_t | int16_t | 0.823ms | 0.955ms | +16.0% |
-| int16_t | int32_t | 1.182ms | 1.207ms | +2.2% |
-| int16_t | int64_t | 1.962ms | 1.973ms | +0.6% |
-| int16_t | ulonglong2 | 3.452ms | 3.459ms | +0.2% |
-| int32_t | int8_t | 1.966ms | 2.028ms | +3.2% |
-| int32_t | int16_t | 2.341ms | 2.379ms | +1.6% |
-| int32_t | int32_t | 3.068ms | 3.100ms | +1.0% |
-| int32_t | int64_t | 4.580ms | 4.671ms | +2.0% |
-| int32_t | ulonglong2 | 7.641ms | 7.663ms | +0.3% |
-| int64_t | int8_t | 6.866ms | 6.931ms | +1.0% |
-| int64_t | int16_t | 7.588ms | 7.643ms | +0.7% |
-| int64_t | int32_t | 9.054ms | 9.083ms | +0.3% |
-| int64_t | int64_t | 11.979ms | 12.003ms | +0.2% |
-| int64_t | ulonglong2 | 18.182ms | 18.264ms | +0.5% |
-| float | int8_t | 1.965ms | 2.043ms | +4.0% |
-| float | int16_t | 2.339ms | 2.377ms | +1.6% |
-| float | int32_t | 3.066ms | 3.102ms | +1.2% |
-| float | int64_t | 4.595ms | 4.673ms | +1.7% |
-| float | ulonglong2 | 7.636ms | 7.663ms | +0.4% |
-| double | int8_t | 6.911ms | 7.019ms | +1.6% |
-| double | int16_t | 7.639ms | 7.864ms | +2.9% |
-| double | int32_t | 9.107ms | 9.380ms | +3.0% |
-| double | int64_t | 12.107ms | 12.380ms | +2.3% |
-| double | ulonglong2 | 19.682ms | 19.846ms | +0.8% |
-
-</details>
+| int8_t | int8_t | 0.264ms | 0.369ms | +39.5% |
+| int8_t | int16_t | 0.328ms | 0.457ms | +39.4% |
+| int8_t | int32_t | 0.506ms | 0.518ms | +2.4% |
+| int8_t | int64_t | 0.895ms | 0.909ms | +1.6% |
+| int8_t | ulonglong2 | 1.637ms | 1.652ms | +0.9% |
+| int16_t | int8_t | 0.621ms | 0.692ms | +11.6% |
+| int16_t | int16_t | 0.819ms | 0.948ms | +15.8% |
+| int16_t | int32_t | 1.178ms | 1.202ms | +2.1% |
+| int16_t | int64_t | 1.947ms | 1.963ms | +0.8% |
+| int16_t | ulonglong2 | 3.426ms | 3.451ms | +0.7% |
+| int32_t | int8_t | 1.959ms | 2.018ms | +3.0% |
+| int32_t | int16_t | 2.334ms | 2.365ms | +1.3% |
+| int32_t | int32_t | 3.053ms | 3.083ms | +1.0% |
+| int32_t | int64_t | 4.557ms | 4.675ms | +2.6% |
+| int32_t | ulonglong2 | 7.571ms | 7.653ms | +1.1% |
+| int64_t | int8_t | 6.845ms | 6.923ms | +1.1% |
+| int64_t | int16_t | 7.572ms | 7.630ms | +0.8% |
+| int64_t | int32_t | 9.033ms | 9.089ms | +0.6% |
+| int64_t | int64_t | 11.921ms | 12.001ms | +0.7% |
+| int64_t | ulonglong2 | 18.055ms | 18.254ms | +1.1% |
+| float | int8_t | 1.961ms | 2.032ms | +3.6% |
+| float | int16_t | 2.334ms | 2.366ms | +1.4% |
+| float | int32_t | 3.053ms | 3.083ms | +1.0% |
+| float | int64_t | 4.579ms | 4.677ms | +2.1% |
+| float | ulonglong2 | 7.571ms | 7.653ms | +1.1% |
+| double | int8_t | 6.884ms | 7.009ms | +1.8% |
+| double | int16_t | 7.618ms | 7.854ms | +3.1% |
+| double | int32_t | 9.099ms | 9.390ms | +3.2% |
+| double | int64_t | 12.038ms | 12.353ms | +2.6% |
+| double | ulonglong2 | 18.060ms | 18.263ms | +1.1% |
 
 ## Features
 
